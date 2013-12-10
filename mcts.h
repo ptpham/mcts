@@ -8,6 +8,7 @@
 #include <map>
 
 #include <math.h>
+#include <float.h>
 
 // This namespace defines a collection of interfaces used to represent games.
 // Functions prefixed with as_ will wrap a given object in the specified
@@ -142,12 +143,15 @@ namespace mcts {
     std::vector<suggestor<A>> suggestors;
     S state;
 
-    void inform_all(const std::vector<A>& actions, const std::vector<double>& goals) {
-      for (unsigned i = 0; i < suggestors.size(); i++) {
-        suggestors[i].inform(actions[i], goals[i]);
-      }
-    }
   };
+
+  template <class A>
+  void inform_joint(const std::vector<suggestor<A>>& suggestors,
+    const std::vector<A>& actions, const std::vector<double>& goals) {
+    for (unsigned i = 0; i < suggestors.size(); i++) {
+      suggestors[i].inform(actions[i], goals[i]);
+    }
+  }
 
   template <class T> static std::vector<T> 
   random_joint(const std::vector<std::vector<T>>& actions) {
@@ -203,7 +207,7 @@ namespace mcts {
       };
     }
 
-    // Removes nodes that are no longer reachable from memory
+    // Removes nodes that are no longer reachable from the root
     std::unordered_set<S> flush() {
       auto reachable = graph::reachable(root->state, v_edges());
       nodes = colut::retain_keys<S,A>(nodes, reachable);
@@ -211,10 +215,12 @@ namespace mcts {
     }
 
     node<S,A>* submerge_state(S state) {
-      if (nodes.find(state) == nodes.end()) {
+      auto found = nodes.find(state);
+      if (found == nodes.end()) {
         nodes.emplace(state, factory(state));
+        found = nodes.find(state);
       }
-      return &nodes.find(state)->second;
+      return &found->second;
     }
 
     // Performs one iteration of MCTS. The steps are a walk_to_boundary, a
@@ -224,30 +230,24 @@ namespace mcts {
     boundary_edge<S,A> pass(machine::advancer<S,A>& advancer, 
       machine::evaluator<S>& evaluator) {
       auto path = walk_to_boundary(root);
+      auto end = path.back();
 
-      boundary_edge<S,A> result;
-      auto target = path.back().first->state;
-      if (!evaluator.terminal(target)) {
-        auto actions = advancer.actions(target);
-        auto joint = random_joint(actions);
-        target = advancer.next(target, joint);
-
-        // Return a valid result instead of an empty one
-        result.first = path.back().first;
-        result.second = joint;
-      }
-
+      auto target = advancer.next(end.first->state, end.second);
       auto charge = mcts::depth_charge(target, advancer, evaluator);
 
       auto goals = evaluator.goals(charge.back());
-      for (auto& edge : path) edge.first->inform_all(edge.second, goals);
-      return result;
+      for (auto& edge : path) {
+        inform_joint(edge.first->suggestors, edge.second, goals);
+      }
+
+      return path.back();
     }
 
     node<S,A>* expand(boundary_edge<S,A>& edge, 
-    machine::advancer<S,A>& advancer) {
+    machine::advancer<S,A>& advancer, machine::evaluator<S>& evaluator) {
       if (edge.first == NULL) return NULL;
       auto next = advancer.next(edge.first->state, edge.second);
+      if (evaluator.terminal(next)) return NULL;
       auto child = submerge_state(next);
       edge.first->children.emplace(edge.second, child);
       return child;
@@ -266,6 +266,7 @@ namespace mcts {
       for (auto &suggestor : cur->suggestors) {
         joint.push_back(suggestor.explore());
       }
+
       result.push_back(make_pair(cur, joint));
       auto next = cur->children.find(joint);
       if (next != cur->children.end()) cur = next->second;
@@ -289,6 +290,7 @@ namespace ucb {
     }
 
     double upper(double c, double total) const {
+      if (count == 0) return DBL_MAX;
       return mean + c * sqrt(2*log2(total)/count);
     }
   };
